@@ -1,0 +1,88 @@
+/**
+ * @file This Firestore Security Rules file enforces a strict user-ownership model for a time-tracking application.
+ *
+ * Core Philosophy:
+ * This ruleset enforces a strict user-ownership model.  Each user can only access their own profile data and their own work day records.
+ *
+ * Data Structure:
+ * - /users/{userId}: Stores user profile information.  The userId MUST match the Firebase auth UID.
+ * - /users/{userId}/workDays/{workDayId}: Stores individual work day records for a given user.  The userId within the workDay document MUST match the parent userId.
+ *
+ * Key Security Decisions:
+ * - User listing is disallowed to protect user privacy.
+ * - All writes are validated against the authenticated user's UID to prevent unauthorized data modification.
+ *
+ * Denormalization for Authorization:
+ * - The `WorkDay` documents include the `userId` field, which is a denormalized copy of the parent user's ID. This denormalization allows security rules to be written without needing to perform `get()` operations to check the parent user's ID.
+ */
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /**
+     * @description Protects user profile data.  Only the authenticated user can read or write their own profile.
+     * @path /users/{userId}
+     * @allow (create) User with UID 'user_abc' can create their profile if request.auth.uid == 'user_abc'.
+     * @allow (get) User with UID 'user_abc' can read their profile if request.auth.uid == 'user_abc'.
+     * @allow (update) User with UID 'user_abc' can update their profile if request.auth.uid == 'user_abc'.
+     * @allow (delete) User with UID 'user_abc' can delete their profile if request.auth.uid == 'user_abc'.
+     * @deny (create) User with UID 'user_xyz' cannot create a profile for 'user_abc'.
+     * @deny (get) User with UID 'user_xyz' cannot read the profile of 'user_abc'.
+     * @principle Enforces document ownership for writes and reads.
+     */
+    match /users/{userId} {
+      // isOwner will check request.auth != null && request.auth.uid == userId
+      allow get: if isOwner(userId);
+      allow list: if false; // User listing is not allowed.
+      allow create: if isSignedIn() && request.auth.uid == userId;
+      allow update: if isExistingOwner(userId);
+      allow delete: if isExistingOwner(userId);
+    }
+
+    /**
+     * @description Protects work day records. Only the authenticated user can manage their own work day records.
+     * @path /users/{userId}/workDays/{workDayId}
+     * @allow (create) User with UID 'user_abc' can create a work day if request.auth.uid == 'user_abc' and request.resource.data.userId == 'user_abc'.
+     * @allow (get) User with UID 'user_abc' can read their work day if request.auth.uid == 'user_abc'.
+     * @allow (update) User with UID 'user_abc' can update their work day if request.auth.uid == 'user_abc' and resource.data.userId == 'user_abc'.
+     * @allow (delete) User with UID 'user_abc' can delete their work day if request.auth.uid == 'user_abc' and resource.data.userId == 'user_abc'.
+     * @deny (create) User with UID 'user_xyz' cannot create a work day for user 'user_abc'.
+     * @deny (get) User with UID 'user_xyz' cannot read work day of user 'user_abc'.
+     * @principle Enforces document ownership and validates relational integrity.
+     */
+    match /users/{userId}/workDays/{workDayId} {
+      allow get: if isOwner(userId);
+      allow list: if isOwner(userId);
+      allow create: if isSignedIn() && isCreatingOwnedBy(userId);
+      allow update: if isExistingOwner(userId) && isOwnedBy(userId);
+      allow delete: if isOwner(userId);
+    }
+
+    // --- Helper Functions ---
+
+    // Returns true if the user is signed in.
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Returns true if the user is the owner of the document (userId matches auth.uid).
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Returns true if the user is creating a document where the 'userId' field matches the path.
+    function isCreatingOwnedBy(userId) {
+        return request.resource.data.userId == userId;
+    }
+
+    // Returns true if the document exists and the user is the owner (used for update/delete).
+    function isExistingOwner(userId) {
+      return isSignedIn() && resource != null && request.auth.uid == userId;
+    }
+
+      // Returns true if the document's 'userId' field matches the path.
+    function isOwnedBy(userId) {
+      return request.resource.data.userId == userId;
+    }
+  }
+}
